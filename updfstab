@@ -28,6 +28,11 @@ touch $LOCKFILE
 
 # be sure the drivers are loaded
 modprobe usb_storage vfat
+
+# create the FSH required /media directory
+# Please read: http://www.pathname.com/fhs/pub/fhs-2.3.html#MEDIAMOUNTPOINT
+if [ ! -d /media ]; then mkdir /media; fi
+
 # First remove all updfstab-managed devices from fstab
 # existing but removed entries are just added again later
 # mount points are not removed (unuseful)
@@ -75,9 +80,9 @@ for i in $list; do
       fi
     fi
     if [ `echo ${partitions}|wc -w` -eq 1 ]; then
-      mntpoint="/mnt/${mpname}" # if only one partition
+      mntpoint="/media/${mpname}" # if only one partition
     else
-      mntpoint="/mnt/${mpname}-`basename $p`" # if several partitions
+      mntpoint="/media/${mpname}-`basename $p`" # if several partitions
     fi
     # if the mount point is used for another device, append a number
     count=1
