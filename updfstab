@@ -1,6 +1,6 @@
 #!/bin/sh
 # name: /etc/dev.d/default/updfstab.dev
-# version: 7
+# version: 8
 # purpose: automatic handling of /etc/fstab for usb_storage devices under kernel 2.6 with udev
 # This script is automatically called by udevd at each plug/unplug event of an usb device.
 # It adds a line in /etc/fstab for each usb_storage device found,
@@ -25,16 +25,31 @@
 # Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 ##################################################################
 
+# to debug this script, uncomment the next line and see /tmp/upfstab.debug after execution
+#DEBUG=1
+DEBUGOUT=/tmp/updfstab.debug$$
+if [ "$DEBUG" = "1" -a -z "$2" ]; then
+  echo "execution de $0 $@" > $DEBUGOUT
+  echo "avec les variables suivantes:" >> $DEBUGOUT
+  env >> $DEBUGOUT
+  echo "----" >> $DEBUGOUT
+  sh -x $0 $@ debug >> $DEBUGOUT 2>&1
+  exit
+fi
+
+
 # we only manage block devices
 if [ "$1" != "block" ]; then exit; fi
 
 # we only manage usb_storage devices
-device=`ls /sys$DEVPATH/../device/../../../ | grep ':' | head -1`
-if [ ! -e /sys/bus/usb/drivers/usb-storage/$device ]; then exit; fi
+if [ "$ACTION" = "add" ]; then
+  device="`ls /sys$DEVPATH/../device/../../../ 2> /dev/NULL | grep ':' | head -1`"
+  if [ -z "$device" -o ! -e /sys/bus/usb/drivers/usb-storage/$device ]; then exit; fi
+fi
 
 # be sure the drivers are loaded
-/sbin/modprobe usb_storage
-/sbin/modprobe vfat
+/sbin/modprobe -q usb_storage
+/sbin/modprobe -q vfat
 
 # create the FSH required /media directory
 # See: http://www.pathname.com/fhs/pub/fhs-2.3.html#MEDIAMOUNTPOINT
@@ -52,7 +67,7 @@ fi
 if [ -z "$DEVPATH" -o -z "$DEVNAME" -o -z "$ACTION" ]; then
   echo
   echo "This script must be called by udevd because it needs the following environment variables: DEVPATH, DEVNAME, ACTION"
-  echo "So you must copy this script as /etc/dev.d/usb/updfstab-2.6.dev and set it executable"
+  echo "So you must copy this script as /etc/dev.d/default/updfstab-2.6.dev and set it executable"
   echo "See: http://www.kernel.org/pub/linux/utils/kernel/hotplug/RFC-dev.d"
   echo
   exit
@@ -61,17 +76,17 @@ fi
 # if $DEVPATH/device exists, we are a device, not a partition, so exit
 if [ -d /sys${DEVPATH}/device ]; then exit; fi
 
-# if the current device is being removed
-if [ "$ACTION" = "remove" ]; then
 
+# remove the fstab entry and the mountpoint if they already exist
+if grep -q "^$DEVNAME\ .*\#updfstab$" /etc/fstab; then
   # get the mount point from fstab
   mntpoint=`grep "^$DEVNAME\ .*\#updfstab$" /etc/fstab | sed "s/.* \/${MNT}/\/${MNT}/g; s/ .*//g"`
   # remove the mount point
-  if [ ! -z "$mntpoint" ]; then rmdir $mntpoint; fi
+  if [ ! -z "$mntpoint" -a -d $mntpoint ]; then rmdir $mntpoint; fi
 
   # sleep a random amount of time to avoid simultaneous modification of fstab by parallel scripts
   sleep 0.$RANDOM
-  # remove the fstab entry
+  # remove the fstab entry corresponding to the device
   TMP=/etc/fstab.updated$$
   grep -v  "^$DEVNAME\ .*\#updfstab$" /etc/fstab > $TMP
   if diff /etc/fstab $TMP >/dev/null 2>&1; then
@@ -82,7 +97,6 @@ if [ "$ACTION" = "remove" ]; then
     fi
     rm -f $TMP
   fi
-  #exit
 fi
 
 # if the current device is being added
@@ -105,19 +119,17 @@ fi;  fi;  fi
   if [ ! -z "$partnumber" -a "$partnumber" != "1" ]; then
     mntpoint="${mntpoint}-part${partnumber}"
     # sleep a bit to avoid simultaneous modification of fstab by parallel scripts
-    sleep 0.${partnumber}
+    if [ "$partnumber" != "0" ]; then sleep 0.${partnumber}; fi
   fi
 
   # if the mount point is already used in fstab, append a number
-  count=1
-  while grep " $mntpoint " /etc/fstab; do
-    let count++
-    mntpoint=`printf ${mntpoint}-${count}`
-  done
+  count=`grep -cE " ${mntpoint}[-]?[[:digit:]]* " /etc/fstab`
+  if [ $count -ne 0 ]; then mntpoint="${mntpoint}-${count}"; fi
 
-  # create the mountpoint and the fstab entry
+  # create the mountpoint and the fstab entry if they don't exist
     if [ ! -d "${mntpoint}" ]; then mkdir ${mntpoint}; fi
-    echo "$DEVNAME $mntpoint auto sync,user,noauto,rw,iocharset=utf8 0 0 #updfstab" >> /etc/fstab
+    FSTABLINE="$DEVNAME $mntpoint auto sync,user,noauto,rw,iocharset=utf8 0 0 #updfstab"
+    echo "$FSTABLINE" >> /etc/fstab
 fi
 
 
