@@ -1,6 +1,6 @@
 #!/bin/sh
 # name: /etc/dev.d/default/updfstab.dev
-# version: 11
+# version: 12
 # purpose: automatic handling of /etc/fstab for usb_storage devices under kernel 2.6 with udev
 # This script is automatically called by udevd at each plug/unplug event of an usb device.
 # It adds a line in /etc/fstab for each usb_storage device found,
@@ -145,10 +145,16 @@ if [ "$ACTION" = "add" ]; then
   # if we are an extended partition, just exit
   if echo "$FILETYPE" | grep -q "extended partition table"; then cleanquit; fi
 
-  # handle XFS (file doesn't print label)
+  # handle XFS ('file' doesn't print label)
   xfs=`echo "$FILETYPE" | grep "XFS"`
-  if [ -x "`which xfs_admin`" -a -z "${label}" -a ! -z "${xfs}" ]; then
+  if [ -z "${label}" -a ! -z "${xfs}" -a -x "`which xfs_admin`" ]; then
     label=`xfs_admin -l $DEVNAME | sed 's/.*label\ =\ *"\+//; s/"\+$//; s/[ \/]//g'`
+  fi
+
+  # handle EXT2/3
+  ext=`echo "$FILETYPE" | grep "ext[23]"`
+  if [ ! -z "${ext}" -a -z "${label}" -a -x "`which e2label`" ]; then
+    label=`e2label $DEVNAME | sed 's/[ \/]//g'`
   fi
 
   # build a mountpoint name = label, else product, else manufacturer, else usb-disk
@@ -177,7 +183,7 @@ if [ "$ACTION" = "add" ]; then
   # if we are a FAT or NTFS, set the charset to utf8
   if echo $FILETYPE | grep -q "FAT"; then IOCHARSET=",iocharset=utf8"; fi
   if echo $FILETYPE | grep -q "NTFS"; then IOCHARSET=",iocharset=utf8"; fi
-  FSTABLINE="$DEVNAME $mntpoint auto sync,user,noauto,rw${IOCHARSET} 0 0 #updfstab"
+  FSTABLINE="$DEVNAME $mntpoint auto sync,user,noauto,noatime,rw${IOCHARSET} 0 0 #updfstab"
   echo "$FSTABLINE" >> /etc/fstab
   write_syslog "Added $DEVNAME to fstab"
 fi
