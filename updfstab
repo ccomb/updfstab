@@ -1,6 +1,8 @@
 #!/bin/sh
+# exit immediately if /usr/bin/ is not yet available (during boot if /usr is a separate partition)
+test -d /usr/bin || exit
 # name: /etc/dev.d/default/updfstab.dev
-# version: 14
+# version: 15
 # purpose: automatic handling of /etc/fstab for usb_storage devices under kernel 2.6 with udev
 # This script is automatically called by udevd at each plug/unplug event of an usb device.
 # It adds a line in /etc/fstab for each usb_storage device found,
@@ -28,8 +30,6 @@
 # to debug this script, uncomment the next line and see /tmp/updfstab.debug after execution
 #DEBUG=1
 
-# exit immediately if /usr/bin/ is not yet available (during boot if /usr is a separate partition)
-/bin/ls -d /usr/bin/ >/dev/null 2>&1 || exit
 
 DEBUGOUT=/tmp/updfstab.debug.$$
 if [ "$DEBUG" = "1" -a -z "$2" ]; then
@@ -75,7 +75,7 @@ write_syslog () {
 /sbin/modprobe -q usb_storage
 /sbin/modprobe -q vfat
 
-# create the FSH required /media directory
+# create the FHS required /media directory
 # See: http://www.pathname.com/fhs/pub/fhs-2.3.html#MEDIAMOUNTPOINT
 MNT=media
 if [ ! -d /$MNT ]; then
@@ -109,7 +109,7 @@ if grep -q "^$DEVNAME\ .*\#updfstab$" /etc/fstab; then
   # if we want to unplug a mounted device, we are a fool, so limit the damage.
   if mount | grep -q "^$DEVNAME\ "; then
     # if the mountpoint is used by famd, and we kill it, we'll need to restart it
-    if fuser -v USBStorageAdapter | grep -q " famd$"; then RESTARTFAMD=1; fi
+    if fuser -v $mntpoint 2>&1 | grep -q " famd$"; then RESTARTFAMD=1; fi
     fuser -k $mntpoint
     fuser -k -9 $mntpoint
     umount $mntpoint
@@ -171,7 +171,6 @@ if [ "$ACTION" = "add" ]; then
 #  if [ ! -z "$partnumber" -a "$partnumber" != "1" ]; then
 #    mntpoint="${mntpoint}-part${partnumber}"
 #  fi
-
 
   # if the mount point is already used in fstab, append a number
   count=`grep -cE " ${mntpoint}[_]?[[:digit:]]* " /etc/fstab`
