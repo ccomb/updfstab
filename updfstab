@@ -1,9 +1,12 @@
 #!/bin/sh
 # name: /etc/dev.d/default/updfstab.dev
+# version: 7
 # purpose: automatic handling of /etc/fstab for usb_storage devices under kernel 2.6 with udev
-# This script is automatically called by hotplug at each plug/unplug event of an usb device.
+# This script is automatically called by udevd at each plug/unplug event of an usb device.
 # It adds a line in /etc/fstab for each usb_storage device found,
 # with a pretty name as mountpoint. (based on label or info read from /sys)
+# it takes three environment variables as input : ACTION, DEVNAME and DEVPATH
+# These variables are provided by udevd
 ##################################################################
 # Copyright (C) 2004 Christophe Combelles (ccomb@free.fr)
 #
@@ -21,79 +24,100 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 ##################################################################
-LOCKFILE=/var/lock/updfstab.lock
-terminate() { rm -f $LOCKFILE; exit; }
-if [ -e $LOCKFILE ]; then exit; fi
-touch $LOCKFILE
+
+# we only manage block devices
+if [ "$1" != "block" ]; then exit; fi
+
+# we only manage usb_storage devices
+device=`ls /sys$DEVPATH/../device/../../../ | grep ':' | head -1`
+if [ ! -e /sys/bus/usb/drivers/usb-storage/$device ]; then exit; fi
 
 # be sure the drivers are loaded
-modprobe usb_storage vfat
+/sbin/modprobe usb_storage
+/sbin/modprobe vfat
 
 # create the FSH required /media directory
-# Please read: http://www.pathname.com/fhs/pub/fhs-2.3.html#MEDIAMOUNTPOINT
-if [ ! -d /media ]; then mkdir /media; fi
-
-# First remove all updfstab-managed devices from fstab
-# existing but removed entries are just added again later
-# mount points are not removed (unuseful)
-grep -v \#updfstab /etc/fstab > /etc/fstab.updated
-if diff /etc/fstab /etc/fstab.updated >/dev/null 2>&1; then
-  rm /etc/fstab.updated
-else
-  if [ -s /etc/fstab.updated ]; then
-    cat /etc/fstab.updated > /etc/fstab
+# See: http://www.pathname.com/fhs/pub/fhs-2.3.html#MEDIAMOUNTPOINT
+MNT=media
+if [ ! -d /$MNT ]; then
+  mkdir /$MNT
+  echo "Created the /$MNT directory"
+  if [ "$MNT" = "media" ]; then
+    echo "It is required by FHS standard"
+    echo "Please read: http://www.pathname.com/fhs/pub/fhs-2.3.html#MEDIAMOUNTPOINT"
   fi
-  rm /etc/fstab.updated
 fi
 
-# wait a few seconds until something appears
-timeout=20 # timeout in tenths of second for giving up
-while true; do
-  # list devices
-  list="`ls /sys/bus/usb/drivers/usb-storage`"
-  if test "$list"; then break; fi
-  sleep 0.1
-  timeout=$((${timeout}-1))
-  if [ $timeout -eq 0 ]; then terminate; fi
-done
+# we need DEVPATH, DEVNAME and ACTION
+if [ -z "$DEVPATH" -o -z "$DEVNAME" -o -z "$ACTION" ]; then
+  echo
+  echo "This script must be called by udevd because it needs the following environment variables: DEVPATH, DEVNAME, ACTION"
+  echo "So you must copy this script as /etc/dev.d/usb/updfstab-2.6.dev and set it executable"
+  echo "See: http://www.kernel.org/pub/linux/utils/kernel/hotplug/RFC-dev.d"
+  echo
+  exit
+fi
 
-for i in $list; do
-  j="`printf $i | sed 's/:.*//g'`" # exemple : $i="3-2:1.0" -> we extract $j="3-2"
-  # for each device, get infos
-  host="`ls -1 /sys/bus/usb/drivers/usb-storage/$i | grep host`" # used to find the /dev entry
-  manufacturer="`cat /sys/bus/usb/devices/$j/manufacturer | sed 's/[ \/]//g'`" # used to chose a mountpoint
-  product="`cat /sys/bus/usb/devices/$j/product | sed 's/[ \/]//g'`" # used to chose a mountpoint
-  #serial="`cat /sys/bus/usb/devices/$j/serial`" # could be used to create a udev rule
-  # find partitions
-  partitions=`find /dev/scsi/${host} -type b -name "part*" -print`
-  
-  # for each partition, create a mountpoint and an fstab entry
-  for p in ${partitions}; do
-    # get the partition label
-    label="`file -s $p | grep "label:" | sed 's/.*label:\ *"//; s/".*//; s/[ \/]//g'`"
-    # build a mountpoint name: label else product, else manufacturer, else usb-disk
-    if [ ! -z "${label}" ]; then mpname="${label}"
-    else if [ ! -z "${product}" ]; then mpname="${product}"
-      else if [ ! -z "${manufacturer}" ]; then mpname="${manufacturer}"
-        else mpname=usb-disk
-        fi
-      fi
+# if $DEVPATH/device exists, we are a device, not a partition, so exit
+if [ -d /sys${DEVPATH}/device ]; then exit; fi
+
+# if the current device is being removed
+if [ "$ACTION" = "remove" ]; then
+
+  # get the mount point from fstab
+  mntpoint=`grep "^$DEVNAME\ .*\#updfstab$" /etc/fstab | sed "s/.* \/${MNT}/\/${MNT}/g; s/ .*//g"`
+  # remove the mount point
+  if [ ! -z "$mntpoint" ]; then rmdir $mntpoint; fi
+
+  # sleep a random amount of time to avoid simultaneous modification of fstab by parallel scripts
+  sleep 0.$RANDOM
+  # remove the fstab entry
+  TMP=/etc/fstab.updated$$
+  grep -v  "^$DEVNAME\ .*\#updfstab$" /etc/fstab > $TMP
+  if diff /etc/fstab $TMP >/dev/null 2>&1; then
+    rm -f $TMP
+  else
+    if [ -s /etc/fstab.updated$$ ]; then
+      cat $TMP > /etc/fstab
     fi
-    if [ `echo ${partitions}|wc -w` -eq 1 ]; then
-      mntpoint="/media/${mpname}" # if only one partition
-    else
-      mntpoint="/media/${mpname}-`basename $p`" # if several partitions
-    fi
-    # if the mount point is used for another device, append a number
-    count=1
-    while grep $mntpoint /etc/fstab; do
-      let count++
-      mntpoint=`printf ${mntpoint}-${count}`
-    done
-    # create the mountpoint and the fstab entry
-      if [ ! -d "${mntpoint}" ]; then mkdir ${mntpoint}; fi
-      echo "$p $mntpoint auto sync,user,noauto,rw,iocharset=utf8 0 0 #updfstab" >> /etc/fstab
+    rm -f $TMP
+  fi
+  #exit
+fi
+
+# if the current device is being added
+if [ "$ACTION" = "add" ]; then
+  # get partition information
+  label="`file -s $DEVNAME | grep "label:" | sed 's/.*label:\ *"//; s/".*//; s/[ \/]//g'`"
+  partition="/sys${DEVPATH}/../device/../../.."
+  if [ -e $partition/product ]; then product="`cat $partition/product | sed 's/[ \/]//g'`"; fi
+  if [ -e $partition/manufacturer ]; then manufacturer="`cat $partition/manufacturer | sed 's/[ \/]//g'`"; fi
+
+# build a mountpoint name = label, else product, else manufacturer, else usb-disk
+if [ ! -z "${label}" ]; then mntpoint="/$MNT/${label}"
+else if [ ! -z "${product}" ]; then mntpoint="/$MNT/${product}"
+     else if [ ! -z "${manufacturer}" ]; then mntpoint="/$MNT/${manufacturer}"
+          else mntpoint="/$MNT/usb-disk"
+fi;  fi;  fi
+
+  # if we are not the partition number 1, append the partition number
+  partnumber=`basename ${DEVPATH} | sed "s/\`basename \\\`dirname ${DEVPATH}\\\`\`//g"`
+  if [ ! -z "$partnumber" -a "$partnumber" != "1" ]; then
+    mntpoint="${mntpoint}-part${partnumber}"
+    # sleep a bit to avoid simultaneous modification of fstab by parallel scripts
+    sleep 0.${partnumber}
+  fi
+
+  # if the mount point is already used in fstab, append a number
+  count=1
+  while grep " $mntpoint " /etc/fstab; do
+    let count++
+    mntpoint=`printf ${mntpoint}-${count}`
   done
-done
-terminate
+
+  # create the mountpoint and the fstab entry
+    if [ ! -d "${mntpoint}" ]; then mkdir ${mntpoint}; fi
+    echo "$DEVNAME $mntpoint auto sync,user,noauto,rw,iocharset=utf8 0 0 #updfstab" >> /etc/fstab
+fi
+
 
