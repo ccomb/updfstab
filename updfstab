@@ -1,33 +1,55 @@
 #!/bin/sh
-# name : /usr/sbin/updfstab
-# updfstab for kernel 2.6
-# this script is automatically called by hotplug at each plug/unplug event of an usb-storage device. (usb keys, mp3 jukeboxes, digital cameras...)
+# name: /etc/hotplug.d/usb/updfstab.hotplug
+# purpose: automatic handling of /etc/fstab for usb_storage devices under kernel 2.6 with udev
+# This script is automatically called by hotplug at each plug/unplug event of an usb device.
+# It adds a line in /etc/fstab for each usb_storage device found,
+# with a pretty name as mountpoint. (based on info read from /sys)
+##################################################################
+# Copyright (C) 2004 Christophe Combelles (ccomb@free.fr)
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+##################################################################
+LOCKFILE=/var/lock/updfstab.lock
+terminate() { rm -f $LOCKFILE; exit; }
+if [ -e $LOCKFILE ]; then exit; fi
+touch $LOCKFILE
 
 # be sure the drivers are loaded
-modprobe usb-storage vfat
+modprobe usb_storage vfat
 # First remove all updfstab-managed devices from fstab
 # existing but removed entries are just added again later
-# mntpoint are not removed (unuseful)
+# mount points are not removed (unuseful)
 grep -v \#serial /etc/fstab > /etc/fstab.updated
 if diff /etc/fstab /etc/fstab.updated >/dev/null 2>&1; then
   rm /etc/fstab.updated
 else
   if [ -s /etc/fstab.updated ]; then
     cat /etc/fstab.updated > /etc/fstab
-    #Xdialog --msgbox "removed $p ${mntpoint} from fstab" 20 30 # debug
   fi
   rm /etc/fstab.updated
 fi
 
-# wait 5 seconds until something appears
-timeout=5 # timeout in tenths of second for giving up
+# wait a few seconds until something appears
+timeout=20 # timeout in tenths of second for giving up
 while true; do
   # list devices
   list="`ls /sys/bus/usb/drivers/usb-storage`"
   if test "$list"; then break; fi
   sleep 0.1
   timeout=$((${timeout}-1))
-  if [ $timeout -eq 0 ]; then exit; fi
+  if [ $timeout -eq 0 ]; then terminate; fi
 done
 
 for i in $list; do
@@ -35,37 +57,33 @@ for i in $list; do
   # for each device, get infos
   host="`ls -1 /sys/bus/usb/drivers/usb-storage/$i | grep host`" # used to find the /dev entry
   manufacturer="`cat /sys/bus/usb/devices/$j/manufacturer | sed 's/[ \/]//g'`" # used to chose a mountpoint
-  product="`cat /sys/bus/usb/devices/$j/product | sed 's/[ \/]//g'`" # not used (could be used in mnt name)
+  product="`cat /sys/bus/usb/devices/$j/product | sed 's/[ \/]//g'`" # used to chose a mountpoint
   serial="`cat /sys/bus/usb/devices/$j/serial`" # used to recognize the entry in fstab
-  #Xdialog --msgbox "host=$host\nmanufacturer=$manufacturer\nproduct=$product\nserial=$serial" 20 30 # debug
   # find partitions
-  partitions=`find /dev/scsi/${host} -type b -name "part*"`
+  partitions=`find /dev/scsi/${host} -type b -name "part*" -print`
   
   # for each partition, create a mountpoint and an fstab entry
   for p in ${partitions}; do
-    # build a mountpoint name
-    if [ -z "${manufacturer}" ]; then
-      if [ -z "${product}" ]; then
-        mpname=usb-disk
-      else
-        mpname="${product}"
-      fi
+    # build a mountpoint name: product, else manufacturer, else usb-disk
+    if [ ! -z "${product}" ]; then
+      mpname="${product}"
     else
-      mpname="${manufacturer}"
+      if [ ! -z "${manufacturer}" ]; then
+        mpname="${manufacturer}"
+      else mpname=usb-disk
+      fi
     fi
     if [ `echo ${partitions}|wc -w` -eq 1 ]; then
       mntpoint="/mnt/${mpname}" # if only one partition
     else
-      mntpoint="/mnt/${mpname}_`basename $p`" # if several partitions
+      mntpoint="/mnt/${mpname}-`basename $p`" # if several partitions
     fi
     # create the mountpoint and the fstab entry
       if [ ! -d "${mntpoint}" ]; then
         mkdir ${mntpoint}
-	#Xdialog --msgbox "created ${mntpoint}" 10 30 # debug
       fi
-      if ! grep "#serial${serial}" /etc/fstab >/dev/null 2>&1; then
-        echo "$p $mntpoint auto sync,user,noauto,rw,iocharset=utf8 0 0 #serial${serial}" >> /etc/fstab
-        #Xdialog --msgbox "added $p ${mntpoint} in fstab" 10 30 # debug
-      fi
+      echo "$p $mntpoint auto sync,user,noauto,rw,iocharset=utf8 0 0 #serial=${serial}" >> /etc/fstab
   done
 done
+terminate
+
