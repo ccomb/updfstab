@@ -1,8 +1,11 @@
 #!/bin/bash
 # exit immediately if /usr/bin/ is not yet available (during boot if /usr is a separate partition)
 test -d /usr/bin || exit
+# exit if /usr/bin is not in the path
+echo $PATH | grep \/usr\/bin || exit
 # name: /etc/dev.d/default/updfstab.dev
-# version: 17
+# version: 18
+# homepage: http://ccomb.free.fr/wiki/wakka.php?wiki=UsbMassStorage
 # purpose: automatic handling of /etc/fstab for usb_storage devices under kernel 2.6 with udev
 # This script is automatically called by udevd at each plug/unplug event of an usb device.
 # It adds a line in /etc/fstab for each usb_storage device found,
@@ -46,6 +49,10 @@ fi
 # we only manage block devices
 if [ "$1" != "block" ]; then exit; fi
 
+# Try to detect the user who plugged the device
+USER=`who|grep ':0'|cut -f1 -d' '  |uniq`
+if [ -z "$USER" ]; then USER=`who|grep tty|cut -f1 -d' ' |uniq`; fi
+
 # get /dev
 DEV=`udevinfo -r`
 if [ $? -eq 127 ]; then exit; fi
@@ -79,13 +86,14 @@ else
 fi
 
 # we only manage usb_storage devices
-# ( better detection is welcome)
+# (better detection is welcome)
 if [ "$ACTION" = "add" ]; then
   # two possibilities, because the /sys tree has not always the same depth
   if [ "$WE_ARE" = "PARTITION" ]; then
     device1="`cd -P /sys${DEVPATH}/../device/../../../../ 2> $DEV/null ; /bin/ls 2> /dev/null | grep ':' | head -n 1`"
     device2="`cd -P /sys${DEVPATH}/../device/../../../ 2> $DEV/null ; /bin/ls 2> /dev/null | grep ':' | head -n 1`"
   else if [ "$WE_ARE" = "DEVICE" ]; then
+    # find a way to not include usb zip drive
     device1="`cd -P /sys${DEVPATH}/device/../../../../ 2> $DEV/null ; /bin/ls 2> /dev/null | grep ':' | head -n 1`"
     device2="`cd -P /sys${DEVPATH}/device/../../../ 2> $DEV/null ; /bin/ls 2> /dev/null | grep ':' | head -n 1`"
   fi; fi
@@ -148,14 +156,32 @@ if grep -q "^$DEVNAME\ .*\#updfstab$" /etc/fstab; then
     # if the mountpoint is used by famd, and we kill it, we'll need to restart it
     if fuser -v $mntpoint 2>&1 | grep -q " famd$"; then RESTARTFAMD=1; fi
     fuser -k $mntpoint
+    sleep 1
     fuser -k -9 $mntpoint
-    umount $mntpoint
+    sleep 1
+    umount -fl $mntpoint
     FAM=/etc/init.d/fam
     if [ "$RESTARTFAMD" = "1" -a -x $FAM ]; then $FAM restart; fi
   fi
   # remove the mount point
   if [ ! -z "$mntpoint" -a -d $mntpoint ]; then rmdir $mntpoint; fi
   write_syslog "Deleted mountpoint $mntpoint"
+
+  # Remove the icon from the KDE desktop
+  kdesktop=/usr/share/apps/kdesktop
+  prettyname=`echo $mntpoint | sed "s/.*\///g"`
+  # alternative pure bash method: 
+  # TMP=$mntpoint
+  # for i in 0 1 2; do
+  #    RES[$i]=${TMP%%/*}
+  #    TMP=${TMP#*/}
+  # done
+  # prettyname=$RES[2]
+  iconFile=$kdesktop/Desktop/$prettyname
+  if [ -f $iconFile -a ! -z "$USER" ]; then
+      write_syslog "Removing the icon $iconFile"
+      rm -f $iconFile
+  fi
 
   # remove the fstab entry corresponding to the device
   TMP=/etc/fstab.updated$$
@@ -175,7 +201,10 @@ fi
 # if the current device is being added
 if [ "$ACTION" = "add" ]; then
   # get partition information
-  FILETYPE="`file -Ls $DEVNAME`"
+  FILETYPE="`file -Lps $DEVNAME`"
+  # if not readable, just exit (ex : usb zip drive with no disk)
+  if echo $FILETYPE | grep -qi "no read perm"; then cleanquit; fi
+  # device or partition ?
   label=`echo "$FILETYPE" | grep "label:" | sed 's/.*label:\ *"//; s/".*//; s/[ \/]//g'`
   if [ "$WE_ARE" = "DEVICE" ]; then cd -P /sys${DEVPATH}/device; fi
   if [ "$WE_ARE" = "PARTITION" ]; then cd -P /sys${DEVPATH}/../device; fi
@@ -185,7 +214,7 @@ if [ "$ACTION" = "add" ]; then
   # if we are an extended partition, just exit
   if echo "$FILETYPE" | grep -q "extended partition table"; then cleanquit; fi
 
-  # handle XFS ('file' doesn't print label)
+  # handle XFS (the "file" command doesn't print label)
   xfs=`echo "$FILETYPE" | grep "XFS"`
   if [ -z "${label}" -a ! -z "${xfs}" -a -x "`which xfs_admin`" ]; then
     label=`xfs_admin -l $DEVNAME | sed 's/.*label\ =\ *"\+//; s/"\+$//; s/[ \/]//g'`
@@ -197,12 +226,13 @@ if [ "$ACTION" = "add" ]; then
     label=`e2label $DEVNAME | sed 's/[ \/]//g'`
   fi
 
-  # build a mountpoint name = label, else model, else vendor, else usb-disk
-  if [ ! -z "${label}" ]; then mntpoint="/$MNT/${label}"
-  else if [ ! -z "${model}" ]; then mntpoint="/$MNT/${model}"
-     else if [ ! -z "${vendor}" ]; then mntpoint="/$MNT/${vendor}"
-          else mntpoint="/$MNT/usb-disk"
+  # build a mountpoint name = label, otherwise model, otherwise vendor, otherwise "usb-disk"
+  if [ ! -z "${label}" ]; then prettyname="${label}"
+  else if [ ! -z "${model}" ]; then prettyname="${model}"
+     else if [ ! -z "${vendor}" ]; then prettyname="${vendor}"
+          else prettyname="usb-disk"
   fi;  fi;  fi
+  mntpoint="/$MNT/$prettyname"
 
   # if the mount point is already used in fstab, append a number
   if grep -qE "^[^#]*[[:space:]]$mntpoint[[:space:]]" /etc/fstab ; then
@@ -233,11 +263,39 @@ if [ "$ACTION" = "add" ]; then
   write_syslog "Added $DEVNAME to fstab"
 
   ############### AUTOMOUNTING #################
-  # we try an automounting with the user connected to X
-  # If you want AUTOMOUNTING, just uncomment the following lines:
+  # If you want AUTOMOUNTING, include "autoumount" in the name of the script
+  # For example: rename the script to "updfstab.automount.dev"
+  # (Then don't forget to unmount before unplugging!)
   #
-  # XUSER=`who | awk '{ if($2==":0") print $1 }' | uniq`
-  # if [ ! -z "$XUSER" ]; then su - $XUSER -c "mount $mntpoint"; fi
+  # we try an automounting with the user connected to X, or tty
+  if echo "$0 $@" | grep -qi automount; then
+    if [ ! -z "$USER" ]; then
+      write_syslog "Automounting $DEVNAME to ${mntpoint} as $FSTYPE"
+      su - $USER -c "mount $mntpoint"
+      # open it with konqueror if kdesktop is running
+      if ps -ef | grep -v grep | grep -q kdesktop ; then su - $USER -c "konqueror -display :0 $mntpoint &" ; fi
+    fi
+  fi
+  ##############################################
+
+  # Add an icon on the KDE desktop
+  kdesktop=/usr/share/apps/kdesktop
+  if [ -d $kdesktop -a ! -d $kdesktop/Desktop ]; then mkdir $kdesktop/Desktop; fi
+  # userDesktop=`su - $USER -c 'echo $HOME'`/Desktop
+  iconFile=$kdesktop/Desktop/$prettyname
+  if [ -d $kdesktop/Desktop ]; then
+      write_syslog "Adding an icon $iconFile"
+      cat > $iconFile <<-EOF
+[Desktop Entry]
+Dev=$DEVNAME
+Encoding=UTF-8
+Icon=hdd_mount
+MountPoint=$mntpoint
+ReadOnly=false
+Type=FSDevice
+UnmountIcon=hdd_unmount
+EOF
+    fi
 fi
 
 # remove the lockfile
