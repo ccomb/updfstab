@@ -35,7 +35,7 @@ for i in $list; do
   # for each device, get infos
   host="`ls -1 /sys/bus/usb/drivers/usb-storage/$i | grep host`" # used to find the /dev entry
   manufacturer="`cat /sys/bus/usb/devices/$j/manufacturer | sed 's/[ \/]//g'`" # used to chose a mountpoint
-  product="`cat /sys/bus/usb/devices/$j/product`" # not used (could be used in mnt name)
+  product="`cat /sys/bus/usb/devices/$j/product | sed 's/[ \/]//g'`" # not used (could be used in mnt name)
   serial="`cat /sys/bus/usb/devices/$j/serial`" # used to recognize the entry in fstab
   #Xdialog --msgbox "host=$host\nmanufacturer=$manufacturer\nproduct=$product\nserial=$serial" 20 30 # debug
   # find partitions
@@ -44,10 +44,19 @@ for i in $list; do
   # for each partition, create a mountpoint and an fstab entry
   for p in ${partitions}; do
     # build a mountpoint name
-    if [ `echo ${partitions}|wc -w` -eq 1 ]; then
-      mntpoint="/mnt/${manufacturer}" # if only one partition
+    if [ -z "${manufacturer}" ]; then
+      if [ -z "${product}" ]; then
+        mpname=usb-disk
+      else
+        mpname="${product}"
+      fi
     else
-      mntpoint="/mnt/${manufacturer}_`basename $p`" # if several partitions
+      mpname="${manufacturer}"
+    fi
+    if [ `echo ${partitions}|wc -w` -eq 1 ]; then
+      mntpoint="/mnt/${mpname}" # if only one partition
+    else
+      mntpoint="/mnt/${mpname}_`basename $p`" # if several partitions
     fi
     # create the mountpoint and the fstab entry
       if [ ! -d "${mntpoint}" ]; then
