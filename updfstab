@@ -1,6 +1,6 @@
 #!/bin/sh
 # name: /etc/dev.d/default/updfstab.dev
-# version: 9
+# version: 10
 # purpose: automatic handling of /etc/fstab for usb_storage devices under kernel 2.6 with udev
 # This script is automatically called by udevd at each plug/unplug event of an usb device.
 # It adds a line in /etc/fstab for each usb_storage device found,
@@ -27,16 +27,19 @@
 
 # to debug this script, uncomment the next line and see /tmp/upfstab.debug after execution
 #DEBUG=1
-DEBUGOUT=/tmp/updfstab.debug$$
+
+# exit immediately if /usr/bin/ is not yet available (during boot if /usr is a separate partition)
+/bin/ls -d /usr/bin/ >/dev/null 2>&1 || exit
+
+DEBUGOUT=/tmp/updfstab.debug.$$
 if [ "$DEBUG" = "1" -a -z "$2" ]; then
-  echo "execution de $0 $@" > $DEBUGOUT
-  echo "avec les variables suivantes:" >> $DEBUGOUT
+  echo "executing $0 $@" > $DEBUGOUT
+  echo "with the following environment variables:" >> $DEBUGOUT
   env >> $DEBUGOUT
   echo "----" >> $DEBUGOUT
   sh -x $0 $@ debug >> $DEBUGOUT 2>&1
   exit
 fi
-
 
 # we only manage block devices
 if [ "$1" != "block" ]; then exit; fi
@@ -47,6 +50,23 @@ if [ "$ACTION" = "add" ]; then
   if [ -z "$device" -o ! -e /sys/bus/usb/drivers/usb-storage/$device ]; then exit; fi
 fi
 
+# lockfile used when modifying /etc/fstab
+LOCKFILE=/var/run/updfstab.dev.fstab
+# remove the lockfile when exiting
+forcequit() {
+rm -f $LOCKFILE; exit
+}
+trap forcequit INT
+trap forcequit TERM
+trap forcequit QUIT
+trap forcequit HUP
+
+# functions for syslog
+LOGGER="logger -t `basename $0`[$$] -p user.notice"
+write_syslog () {
+  echo ${@} | $LOGGER
+}
+
 # be sure the drivers are loaded
 /sbin/modprobe -q usb_storage
 /sbin/modprobe -q vfat
@@ -56,15 +76,15 @@ fi
 MNT=media
 if [ ! -d /$MNT ]; then
   mkdir /$MNT
-  echo "Created the /$MNT directory"
+  write_syslog "Created the /$MNT directory"
   if [ "$MNT" = "media" ]; then
-    echo "It is required by FHS standard"
-    echo "Please read: http://www.pathname.com/fhs/pub/fhs-2.3.html#MEDIAMOUNTPOINT"
+    write_syslog "It is required by FHS standard"
+    write_syslog "Please read: http://www.pathname.com/fhs/pub/fhs-2.3.html#MEDIAMOUNTPOINT"
   fi
 fi
 
-# we need DEVPATH, DEVNAME and ACTION
-if [ -z "$DEVPATH" -o -z "$DEVNAME" -o -z "$ACTION" ]; then
+# we need DEVPATH, DEVNAME and ACTION, so we warn the user that executes this script by hand
+if [ -z "$DEVPATH" -a -z "$DEVNAME" -a -z "$ACTION" ]; then
   echo
   echo "This script must be called by udevd because it needs the following environment variables: DEVPATH, DEVNAME, ACTION"
   echo "So you must copy this script as /etc/dev.d/default/updfstab-2.6.dev and set it executable"
@@ -76,6 +96,9 @@ fi
 # if $DEVPATH/device exists, we are a device, not a partition, so exit
 if [ -d /sys${DEVPATH}/device ]; then exit; fi
 
+
+# write a lockfile to avoid simultaneous modifications of fstab by parallel scripts
+lockfile -1 -l 2 -s 2 $LOCKFILE
 
 # remove the fstab entry and the mountpoint if they already exist
 if grep -q "^$DEVNAME\ .*\#updfstab$" /etc/fstab; then
@@ -93,9 +116,8 @@ if grep -q "^$DEVNAME\ .*\#updfstab$" /etc/fstab; then
   fi
   # remove the mount point
   if [ ! -z "$mntpoint" -a -d $mntpoint ]; then rmdir $mntpoint; fi
+  write_syslog "Deleted mountpoint $mntpoint"
 
-  # sleep a random amount of time to avoid simultaneous modification of fstab by parallel scripts
-  sleep 0.$RANDOM
   # remove the fstab entry corresponding to the device
   TMP=/etc/fstab.updated$$
   grep -v  "^$DEVNAME\ .*\#updfstab$" /etc/fstab > $TMP
@@ -104,10 +126,14 @@ if grep -q "^$DEVNAME\ .*\#updfstab$" /etc/fstab; then
   else
     if [ -s /etc/fstab.updated$$ ]; then
       cat $TMP > /etc/fstab
+      write_syslog "Removed $DEVNAME from fstab"
     fi
     rm -f $TMP
   fi
 fi
+
+# remove the lockfile
+rm -f $LOCKFILE
 
 # if the current device is being added
 if [ "$ACTION" = "add" ]; then
@@ -118,12 +144,12 @@ if [ "$ACTION" = "add" ]; then
   if [ -e $partition/product ]; then product="`cat $partition/product | sed 's/[ \/]//g'`"; fi
   if [ -e $partition/manufacturer ]; then manufacturer="`cat $partition/manufacturer | sed 's/[ \/]//g'`"; fi
 
-# build a mountpoint name = label, else product, else manufacturer, else usb-disk
-if [ ! -z "${label}" ]; then mntpoint="/$MNT/${label}"
-else if [ ! -z "${product}" ]; then mntpoint="/$MNT/${product}"
+  # build a mountpoint name = label, else product, else manufacturer, else usb-disk
+  if [ ! -z "${label}" ]; then mntpoint="/$MNT/${label}"
+  else if [ ! -z "${product}" ]; then mntpoint="/$MNT/${product}"
      else if [ ! -z "${manufacturer}" ]; then mntpoint="/$MNT/${manufacturer}"
           else mntpoint="/$MNT/usb-disk"
-fi;  fi;  fi
+  fi;  fi;  fi
 
   # if we are not the partition number 1, append the partition number
   partnumber=`basename ${DEVPATH} | sed "s/\`basename \\\`dirname ${DEVPATH}\\\`\`//g"`
@@ -133,17 +159,27 @@ fi;  fi;  fi
     if [ "$partnumber" != "0" ]; then sleep 0.${partnumber}; fi
   fi
 
+  # write a lockfile to avoid simultaneous modifications of fstab by parallel scripts
+  lockfile -1 -l 2 -s 2 $LOCKFILE
+
   # if the mount point is already used in fstab, append a number
   count=`grep -cE " ${mntpoint}[-]?[[:digit:]]* " /etc/fstab`
   if [ $count -ne 0 ]; then mntpoint="${mntpoint}-${count}"; fi
 
   # create the mountpoint and the fstab entry if they don't exist
-    if [ ! -d "${mntpoint}" ]; then mkdir ${mntpoint}; fi
-    # if we are a FAT or NTFS, set the charset to utf8
-    if echo $FILETYPE | grep -q "FAT"; then IOCHARSET=",iocharset=utf8"; fi
-    if echo $FILETYPE | grep -q "NTFS"; then IOCHARSET=",iocharset=utf8"; fi
-    FSTABLINE="$DEVNAME $mntpoint auto sync,user,noauto,rw${IOCHARSET} 0 0 #updfstab"
-    echo "$FSTABLINE" >> /etc/fstab
+  if [ ! -d "${mntpoint}" ]; then
+    mkdir ${mntpoint}
+    write_syslog "Created mountpoint ${mntpoint}"
+  fi
+  # if we are a FAT or NTFS, set the charset to utf8
+  if echo $FILETYPE | grep -q "FAT"; then IOCHARSET=",iocharset=utf8"; fi
+  if echo $FILETYPE | grep -q "NTFS"; then IOCHARSET=",iocharset=utf8"; fi
+  FSTABLINE="$DEVNAME $mntpoint auto sync,user,noauto,rw${IOCHARSET} 0 0 #updfstab"
+  echo "$FSTABLINE" >> /etc/fstab
+  write_syslog "Added $DEVNAME to fstab"
+
+  # remove the lockfile
+  rm -f $LOCKFILE
 fi
 
 
