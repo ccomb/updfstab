@@ -1,16 +1,16 @@
-#!/bin/sh
+#!/bin/bash
 # exit immediately if /usr/bin/ is not yet available (during boot if /usr is a separate partition)
 test -d /usr/bin || exit
 # name: /etc/dev.d/default/updfstab.dev
-# version: 15
+# version: 16
 # purpose: automatic handling of /etc/fstab for usb_storage devices under kernel 2.6 with udev
 # This script is automatically called by udevd at each plug/unplug event of an usb device.
 # It adds a line in /etc/fstab for each usb_storage device found,
 # with a pretty name as mountpoint. (based on label or info read from /sys)
-# it takes three environment variables as input : ACTION, DEVNAME and DEVPATH
+# it takes three environment variables as input : ACTION, DEVPATH and DEVNAME or SUBSYSTEM
 # These variables are provided by udevd
 ##################################################################
-# Copyright (C) 2004 Christophe Combelles (ccomb@free.fr)
+# Copyright (C) 2004-2005 Christophe Combelles (ccomb@free.fr)
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -27,9 +27,11 @@ test -d /usr/bin || exit
 # Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 ##################################################################
 
-# to debug this script, uncomment the next line and see /tmp/updfstab.debug after execution
-#DEBUG=1
+# to debug this script, set DEBUG to 1 and see /tmp/updfstab.debug after execution
+DEBUG=0
 
+# remove all aliases
+unalias -a
 
 DEBUGOUT=/tmp/updfstab.debug.$$
 if [ "$DEBUG" = "1" -a -z "$2" ]; then
@@ -37,17 +39,41 @@ if [ "$DEBUG" = "1" -a -z "$2" ]; then
   echo "with the following environment variables:" >> $DEBUGOUT
   env >> $DEBUGOUT
   echo "----" >> $DEBUGOUT
-  sh -x $0 $@ debug >> $DEBUGOUT 2>&1
+  bash -x $0 $@ debug >> $DEBUGOUT 2>&1
   exit
 fi
 
 # we only manage block devices
 if [ "$1" != "block" ]; then exit; fi
 
+# get /dev
+DEV=`udevinfo -r`
+if [ $? -eq 127 ]; then exit; fi
+
+# we need DEVPATH, and ACTION, and (DEVNAME or SUBSYSTEM) so we warn the user who executes this script himself
+if [ -z "$DEVNAME" -a -z "$SUBSYSTEM" -o -z "$DEVPATH" -o -z "$ACTION" ]; then
+  echo
+  echo "This script must be called by udevd because it needs the following environment variables: DEVPATH, ACTION, and DEVNAME or SUBSYSTEM"
+  echo "So you must copy this script as /etc/dev.d/default/updfstab-2.6.dev and set it executable"
+  echo "See: http://www.kernel.org/pub/linux/utils/kernel/hotplug/RFC-dev.d"
+  echo
+  exit
+fi
+# Since udev 0.46, it seems there is no more DEVNAME at removal.
+if [ -z "$DEVNAME" ]; then DEVNAME="$DEV/`basename $DEVPATH`"; fi
+
+# if $DEVPATH/device exists, we are a device, not a partition, so exit
+if [ -d /sys${DEVPATH}/device ]; then exit; fi
+
 # we only manage usb_storage devices
 if [ "$ACTION" = "add" ]; then
-  device="`ls /sys$DEVPATH/../device/../../../ 2> /dev/NULL | grep ':' | head -1`"
-  if [ -z "$device" -o ! -e /sys/bus/usb/drivers/usb-storage/$device ]; then exit; fi
+  device1="`cd -P /sys${DEVPATH}/../device/../../../../ 2> $DEV/null ; /bin/ls 2> /dev/null | grep ':' | head -n 1`"
+  device2="`cd -P /sys${DEVPATH}/../device/../../../ 2> $DEV/null ; /bin/ls 2> /dev/null | grep ':' | head -n 1`"
+  if [ -z "$device1" -o ! -e /sys/bus/usb/drivers/usb-storage/$device1 ]; then
+    if [ -z "$device2" -o ! -e /sys/bus/usb/drivers/usb-storage/$device2 ]; then
+      exit
+    fi
+  fi
 fi
 
 # lockfile used when modifying /etc/fstab
@@ -63,7 +89,13 @@ trap cleanquit HUP
 
 # write a lockfile to avoid simultaneous modifications of fstab by parallel executions
 # or simultaneous access to the device
-lockfile -1 -l 5 -s 5 $LOCKFILE
+# previous command : lockfile -1 -l 5 -s 5 $LOCKFILE
+COUNT=50
+while [ -e $LOCKFILE -a $COUNT -gt 0 ]; do
+  sleep 0.1
+  COUNT=$((COUNT-1))
+done
+touch $LOCKFILE
 
 # functions for syslog
 LOGGER="logger -t `basename $0`[$$] -p user.notice"
@@ -87,21 +119,7 @@ if [ ! -d /$MNT ]; then
   fi
 fi
 
-# we need DEVPATH, and ACTION, and (DEVNAME or SUBSYSTEM)so we warn the user that executes this script by hand
-if [ -z $DEVNAME -a -z $SUBSYSTEM -o -z "$DEVPATH" -o -z "$ACTION" ]; then
-  echo
-  echo "This script must be called by udevd because it needs the following environment variables: DEVPATH, DEVNAME, ACTION"
-  echo "So you must copy this script as /etc/dev.d/default/updfstab-2.6.dev and set it executable"
-  echo "See: http://www.kernel.org/pub/linux/utils/kernel/hotplug/RFC-dev.d"
-  echo
-  exit
-fi
-#------------------------------------REMOVE----------------------------------
-# if $DEVPATH/device exists, we are a device, not a partition, so exit
-if [ -d /sys${DEVPATH}/device ]; then exit; fi
-
-# Since udev 0.46, it seems there is no more DEVNAME at removal.
-if [ -z "$DEVNAME" ]; then DEVNAME="/dev/`basename $DEVPATH`"; fi
+#------------------------------------UNPLUG----------------------------------
 # remove the fstab entry and the mountpoint if they already exist
 if grep -q "^$DEVNAME\ .*\#updfstab$" /etc/fstab; then
   # get the mount point from fstab
@@ -123,7 +141,7 @@ if grep -q "^$DEVNAME\ .*\#updfstab$" /etc/fstab; then
   # remove the fstab entry corresponding to the device
   TMP=/etc/fstab.updated$$
   grep -v  "^$DEVNAME\ .*\#updfstab$" /etc/fstab > $TMP
-  if diff /etc/fstab $TMP >/dev/null 2>&1; then
+  if diff /etc/fstab $TMP > $DEV/null 2>&1; then
     rm -f $TMP
   else
     if [ -s /etc/fstab.updated$$ ]; then
@@ -134,15 +152,17 @@ if grep -q "^$DEVNAME\ .*\#updfstab$" /etc/fstab; then
   fi
 fi
 
-#------------------------------------ADD----------------------------------
+#------------------------------------PLUG----------------------------------
 # if the current device is being added
 if [ "$ACTION" = "add" ]; then
   # get partition information
-  FILETYPE="`file -s $DEVNAME`"
+  FILETYPE="`file -Ls $DEVNAME`"
   label=`echo "$FILETYPE" | grep "label:" | sed 's/.*label:\ *"//; s/".*//; s/[ \/]//g'`
-  partition="/sys${DEVPATH}/../device/../../.."
-  if [ -e $partition/product ]; then product="`cat $partition/product | sed 's/[ \/]//g'`"; fi
-  if [ -e $partition/manufacturer ]; then manufacturer="`cat $partition/manufacturer | sed 's/[ \/]//g'`"; fi
+  cd -P /sys${DEVPATH}/../device/../../.. 
+  if [ -e product ]; then product="`cat product | sed 's/[ \/]//g'`"
+  else if [ -e ../product ]; then product="`cat ../product | sed 's/[ \/]//g'`"; fi; fi
+  if [ -e manufacturer ]; then manufacturer="`cat manufacturer | sed 's/[ \/]//g'`"
+  else if [ -e ../manufacturer ]; then manufacturer="`cat ../manufacturer | sed 's/[ \/]//g'`"; fi; fi
 
   # if we are an extended partition, just exit
   if echo "$FILETYPE" | grep -q "extended partition table"; then cleanquit; fi
@@ -166,29 +186,40 @@ if [ "$ACTION" = "add" ]; then
           else mntpoint="/$MNT/usb-disk"
   fi;  fi;  fi
 
-  # if we are not the partition number 1, append the partition number
-#  partnumber=`basename ${DEVPATH} | sed "s/\`basename \\\`dirname ${DEVPATH}\\\`\`//g"`
-#  if [ ! -z "$partnumber" -a "$partnumber" != "1" ]; then
-#    mntpoint="${mntpoint}-part${partnumber}"
-#  fi
-
   # if the mount point is already used in fstab, append a number
-  count=`grep -cE " ${mntpoint}[_]?[[:digit:]]* " /etc/fstab`
-  if [ $count -ne 0 ]; then mntpoint="${mntpoint}_$((count+1))"; fi
+  if grep -qE "^[^#]*[[:space:]]$mntpoint[[:space:]]" /etc/fstab ; then
+    count=1
+    while grep -qE "^[^#]*[[:space:]]${mntpoint}_${count}[[:space:]]" /etc/fstab ; do
+      count=$((count+1))
+    done
+    mntpoint=${mntpoint}_${count}
+  fi
 
   # create the mountpoint and the fstab entry if they don't exist
   if [ ! -d "${mntpoint}" ]; then
     mkdir ${mntpoint}
     write_syslog "Created mountpoint ${mntpoint}"
   fi
+  FSTYPE=auto
   # if we are a FAT or NTFS, set the charset to utf8
-  if echo $FILETYPE | grep -q "FAT"; then IOCHARSET=",iocharset=utf8"; fi
-  if echo $FILETYPE | grep -q "NTFS"; then IOCHARSET=",iocharset=utf8"; fi
-  FSTABLINE="$DEVNAME $mntpoint auto user,noauto,noatime,rw${IOCHARSET} 0 0 #updfstab"
+  # Also determine the filesystem. ("auto" does not always work)
+  if echo $FILETYPE | grep -q "FAT"; then IOCHARSET=",iocharset=utf8"; FSTYPE=vfat; fi
+  if echo $FILETYPE | grep -q "NTFS"; then IOCHARSET=",iocharset=utf8"; FSTYPE=ntfs; fi
+  FSTABLINE="$DEVNAME $mntpoint $FSTYPE user,noauto,noatime,rw${IOCHARSET} 0 0 #updfstab"
   echo "$FSTABLINE" >> /etc/fstab
   write_syslog "Added $DEVNAME to fstab"
+
+  ############### AUTOMOUNTING #################
+  # we try an automounting with the user connected to X
+  # If you want AUTOMOUNTING, just uncomment the following lines:
+  #
+  # XUSER=`who | awk '{ if($2==":0") print $1 }' | uniq`
+  # if [ ! -z "$XUSER" ]; then su - $XUSER -c "mount $mntpoint"; fi
 fi
 
 # remove the lockfile
 rm -f $LOCKFILE
+
+
+
 
