@@ -1,6 +1,6 @@
 #!/bin/sh
 # name: /etc/dev.d/default/updfstab.dev
-# version: 10
+# version: 11
 # purpose: automatic handling of /etc/fstab for usb_storage devices under kernel 2.6 with udev
 # This script is automatically called by udevd at each plug/unplug event of an usb device.
 # It adds a line in /etc/fstab for each usb_storage device found,
@@ -53,13 +53,17 @@ fi
 # lockfile used when modifying /etc/fstab
 LOCKFILE=/var/run/updfstab.dev.fstab
 # remove the lockfile when exiting
-forcequit() {
+cleanquit() {
 rm -f $LOCKFILE; exit
 }
-trap forcequit INT
-trap forcequit TERM
-trap forcequit QUIT
-trap forcequit HUP
+trap cleanquit INT
+trap cleanquit TERM
+trap cleanquit QUIT
+trap cleanquit HUP
+
+# write a lockfile to avoid simultaneous modifications of fstab by parallel executions
+# or simultaneous access to the device
+lockfile -1 -l 5 -s 5 $LOCKFILE
 
 # functions for syslog
 LOGGER="logger -t `basename $0`[$$] -p user.notice"
@@ -97,9 +101,6 @@ fi
 if [ -d /sys${DEVPATH}/device ]; then exit; fi
 
 
-# write a lockfile to avoid simultaneous modifications of fstab by parallel scripts
-lockfile -1 -l 2 -s 2 $LOCKFILE
-
 # remove the fstab entry and the mountpoint if they already exist
 if grep -q "^$DEVNAME\ .*\#updfstab$" /etc/fstab; then
   # get the mount point from fstab
@@ -132,9 +133,6 @@ if grep -q "^$DEVNAME\ .*\#updfstab$" /etc/fstab; then
   fi
 fi
 
-# remove the lockfile
-rm -f $LOCKFILE
-
 # if the current device is being added
 if [ "$ACTION" = "add" ]; then
   # get partition information
@@ -144,6 +142,15 @@ if [ "$ACTION" = "add" ]; then
   if [ -e $partition/product ]; then product="`cat $partition/product | sed 's/[ \/]//g'`"; fi
   if [ -e $partition/manufacturer ]; then manufacturer="`cat $partition/manufacturer | sed 's/[ \/]//g'`"; fi
 
+  # if we are an extended partition, just exit
+  if echo "$FILETYPE" | grep -q "extended partition table"; then cleanquit; fi
+
+  # handle XFS (file doesn't print label)
+  xfs=`echo "$FILETYPE" | grep "XFS"`
+  if [ -x "`which xfs_admin`" -a -z "${label}" -a ! -z "${xfs}" ]; then
+    label=`xfs_admin -l $DEVNAME | sed 's/.*label\ =\ *"\+//; s/"\+$//; s/[ \/]//g'`
+  fi
+
   # build a mountpoint name = label, else product, else manufacturer, else usb-disk
   if [ ! -z "${label}" ]; then mntpoint="/$MNT/${label}"
   else if [ ! -z "${product}" ]; then mntpoint="/$MNT/${product}"
@@ -152,19 +159,15 @@ if [ "$ACTION" = "add" ]; then
   fi;  fi;  fi
 
   # if we are not the partition number 1, append the partition number
-  partnumber=`basename ${DEVPATH} | sed "s/\`basename \\\`dirname ${DEVPATH}\\\`\`//g"`
-  if [ ! -z "$partnumber" -a "$partnumber" != "1" ]; then
-    mntpoint="${mntpoint}-part${partnumber}"
-    # sleep a bit to avoid simultaneous modification of fstab by parallel scripts
-    if [ "$partnumber" != "0" ]; then sleep 0.${partnumber}; fi
-  fi
+#  partnumber=`basename ${DEVPATH} | sed "s/\`basename \\\`dirname ${DEVPATH}\\\`\`//g"`
+#  if [ ! -z "$partnumber" -a "$partnumber" != "1" ]; then
+#    mntpoint="${mntpoint}-part${partnumber}"
+#  fi
 
-  # write a lockfile to avoid simultaneous modifications of fstab by parallel scripts
-  lockfile -1 -l 2 -s 2 $LOCKFILE
 
   # if the mount point is already used in fstab, append a number
-  count=`grep -cE " ${mntpoint}[-]?[[:digit:]]* " /etc/fstab`
-  if [ $count -ne 0 ]; then mntpoint="${mntpoint}-${count}"; fi
+  count=`grep -cE " ${mntpoint}[_]?[[:digit:]]* " /etc/fstab`
+  if [ $count -ne 0 ]; then mntpoint="${mntpoint}_$((count+1))"; fi
 
   # create the mountpoint and the fstab entry if they don't exist
   if [ ! -d "${mntpoint}" ]; then
@@ -177,9 +180,8 @@ if [ "$ACTION" = "add" ]; then
   FSTABLINE="$DEVNAME $mntpoint auto sync,user,noauto,rw${IOCHARSET} 0 0 #updfstab"
   echo "$FSTABLINE" >> /etc/fstab
   write_syslog "Added $DEVNAME to fstab"
-
-  # remove the lockfile
-  rm -f $LOCKFILE
 fi
 
+# remove the lockfile
+rm -f $LOCKFILE
 
