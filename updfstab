@@ -1,6 +1,6 @@
 #!/bin/sh
 # name: /etc/dev.d/default/updfstab.dev
-# version: 13
+# version: 14
 # purpose: automatic handling of /etc/fstab for usb_storage devices under kernel 2.6 with udev
 # This script is automatically called by udevd at each plug/unplug event of an usb device.
 # It adds a line in /etc/fstab for each usb_storage device found,
@@ -87,8 +87,8 @@ if [ ! -d /$MNT ]; then
   fi
 fi
 
-# we need DEVPATH, DEVNAME and ACTION, so we warn the user that executes this script by hand
-if [ -z "$DEVPATH" -a -z "$DEVNAME" -a -z "$ACTION" ]; then
+# we need DEVPATH, and ACTION, and (DEVNAME or SUBSYSTEM)so we warn the user that executes this script by hand
+if [ -z $DEVNAME -a -z $SUBSYSTEM -o -z "$DEVPATH" -o -z "$ACTION" ]; then
   echo
   echo "This script must be called by udevd because it needs the following environment variables: DEVPATH, DEVNAME, ACTION"
   echo "So you must copy this script as /etc/dev.d/default/updfstab-2.6.dev and set it executable"
@@ -96,11 +96,12 @@ if [ -z "$DEVPATH" -a -z "$DEVNAME" -a -z "$ACTION" ]; then
   echo
   exit
 fi
-
+#------------------------------------REMOVE----------------------------------
 # if $DEVPATH/device exists, we are a device, not a partition, so exit
 if [ -d /sys${DEVPATH}/device ]; then exit; fi
 
-
+# Since udev 0.46, it seems there is no more DEVNAME at removal.
+if [ -z "$DEVNAME" ]; then DEVNAME="/dev/`basename $DEVPATH`"; fi
 # remove the fstab entry and the mountpoint if they already exist
 if grep -q "^$DEVNAME\ .*\#updfstab$" /etc/fstab; then
   # get the mount point from fstab
@@ -133,6 +134,7 @@ if grep -q "^$DEVNAME\ .*\#updfstab$" /etc/fstab; then
   fi
 fi
 
+#------------------------------------ADD----------------------------------
 # if the current device is being added
 if [ "$ACTION" = "add" ]; then
   # get partition information
