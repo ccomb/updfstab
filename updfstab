@@ -1,6 +1,6 @@
 #!/bin/sh
 # name: /etc/dev.d/default/updfstab.dev
-# version: 12
+# version: 13
 # purpose: automatic handling of /etc/fstab for usb_storage devices under kernel 2.6 with udev
 # This script is automatically called by udevd at each plug/unplug event of an usb device.
 # It adds a line in /etc/fstab for each usb_storage device found,
@@ -25,7 +25,7 @@
 # Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 ##################################################################
 
-# to debug this script, uncomment the next line and see /tmp/upfstab.debug after execution
+# to debug this script, uncomment the next line and see /tmp/updfstab.debug after execution
 #DEBUG=1
 
 # exit immediately if /usr/bin/ is not yet available (during boot if /usr is a separate partition)
@@ -183,7 +183,7 @@ if [ "$ACTION" = "add" ]; then
   # if we are a FAT or NTFS, set the charset to utf8
   if echo $FILETYPE | grep -q "FAT"; then IOCHARSET=",iocharset=utf8"; fi
   if echo $FILETYPE | grep -q "NTFS"; then IOCHARSET=",iocharset=utf8"; fi
-  FSTABLINE="$DEVNAME $mntpoint auto sync,user,noauto,noatime,rw${IOCHARSET} 0 0 #updfstab"
+  FSTABLINE="$DEVNAME $mntpoint auto user,noauto,noatime,rw${IOCHARSET} 0 0 #updfstab"
   echo "$FSTABLINE" >> /etc/fstab
   write_syslog "Added $DEVNAME to fstab"
 fi
