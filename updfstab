@@ -1,9 +1,9 @@
 #!/bin/sh
-# name: /etc/hotplug.d/usb/updfstab.hotplug
+# name: /etc/dev.d/default/updfstab.dev
 # purpose: automatic handling of /etc/fstab for usb_storage devices under kernel 2.6 with udev
 # This script is automatically called by hotplug at each plug/unplug event of an usb device.
 # It adds a line in /etc/fstab for each usb_storage device found,
-# with a pretty name as mountpoint. (based on info read from /sys)
+# with a pretty name as mountpoint. (based on label or info read from /sys)
 ##################################################################
 # Copyright (C) 2004 Christophe Combelles (ccomb@free.fr)
 #
@@ -31,7 +31,7 @@ modprobe usb_storage vfat
 # First remove all updfstab-managed devices from fstab
 # existing but removed entries are just added again later
 # mount points are not removed (unuseful)
-grep -v \#serial /etc/fstab > /etc/fstab.updated
+grep -v \#updfstab /etc/fstab > /etc/fstab.updated
 if diff /etc/fstab /etc/fstab.updated >/dev/null 2>&1; then
   rm /etc/fstab.updated
 else
@@ -58,7 +58,7 @@ for i in $list; do
   host="`ls -1 /sys/bus/usb/drivers/usb-storage/$i | grep host`" # used to find the /dev entry
   manufacturer="`cat /sys/bus/usb/devices/$j/manufacturer | sed 's/[ \/]//g'`" # used to chose a mountpoint
   product="`cat /sys/bus/usb/devices/$j/product | sed 's/[ \/]//g'`" # used to chose a mountpoint
-  serial="`cat /sys/bus/usb/devices/$j/serial`" # used to recognize the entry in fstab
+  #serial="`cat /sys/bus/usb/devices/$j/serial`" # could be used to create a udev rule
   # find partitions
   partitions=`find /dev/scsi/${host} -type b -name "part*" -print`
   
@@ -79,11 +79,15 @@ for i in $list; do
     else
       mntpoint="/mnt/${mpname}-`basename $p`" # if several partitions
     fi
+    # if the mount point is used for another device, append a number
+    count=1
+    while grep $mntpoint /etc/fstab; do
+      let count++
+      mntpoint=`printf ${mntpoint}-${count}`
+    done
     # create the mountpoint and the fstab entry
-      if [ ! -d "${mntpoint}" ]; then
-        mkdir ${mntpoint}
-      fi
-      echo "$p $mntpoint auto sync,user,noauto,rw,iocharset=utf8 0 0 #serial=${serial}" >> /etc/fstab
+      if [ ! -d "${mntpoint}" ]; then mkdir ${mntpoint}; fi
+      echo "$p $mntpoint auto sync,user,noauto,rw,iocharset=utf8 0 0 #updfstab" >> /etc/fstab
   done
 done
 terminate
