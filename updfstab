@@ -64,13 +64,14 @@ for i in $list; do
   
   # for each partition, create a mountpoint and an fstab entry
   for p in ${partitions}; do
-    # build a mountpoint name: product, else manufacturer, else usb-disk
-    if [ ! -z "${product}" ]; then
-      mpname="${product}"
-    else
-      if [ ! -z "${manufacturer}" ]; then
-        mpname="${manufacturer}"
-      else mpname=usb-disk
+    # get the partition label
+    label="`file -s $p | grep "label:" | sed 's/.*label:\ *"//; s/".*//; s/[ \/]//g'`"
+    # build a mountpoint name: label else product, else manufacturer, else usb-disk
+    if [ ! -z "${label}" ]; then mpname="${label}"
+    else if [ ! -z "${product}" ]; then mpname="${product}"
+      else if [ ! -z "${manufacturer}" ]; then mpname="${manufacturer}"
+        else mpname=usb-disk
+        fi
       fi
     fi
     if [ `echo ${partitions}|wc -w` -eq 1 ]; then
