@@ -1,0 +1,306 @@
+#!/bin/bash
+# exit immediately if /usr/bin/ is not yet available (during boot if /usr is a separate partition)
+test -d /usr/bin || exit
+# exit if /usr/bin is not in the path
+echo $PATH | grep \/usr\/bin || exit
+# name: /etc/dev.d/default/updfstab.dev
+# version: 18
+# homepage: http://ccomb.free.fr/wiki/wakka.php?wiki=UsbMassStorage
+# purpose: automatic handling of /etc/fstab for usb_storage devices under kernel 2.6 with udev
+# This script is automatically called by udevd at each plug/unplug event of an usb device.
+# It adds a line in /etc/fstab for each usb_storage device found,
+# with a pretty name as mountpoint. (based on label or info read from /sys)
+# it takes three environment variables as input : ACTION, DEVPATH and DEVNAME or SUBSYSTEM
+# These variables are provided by udevd
+##################################################################
+# Copyright (C) 2004-2005 Christophe Combelles (ccomb@free.fr)
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+##################################################################
+
+# to debug this script, set DEBUG to 1 and see /tmp/updfstab.debug.* after execution
+DEBUG=0
+
+# remove all aliases
+unalias -a
+
+DEBUGOUT=/tmp/updfstab.debug.$$
+if [ "$DEBUG" = "1" -a -z "$2" ]; then
+  echo "executing $0 $@" > $DEBUGOUT
+  echo "with the following environment variables:" >> $DEBUGOUT
+  env >> $DEBUGOUT
+  echo "----" >> $DEBUGOUT
+  bash -x $0 $@ debug >> $DEBUGOUT 2>&1
+  exit
+fi
+
+# we only manage block devices
+if [ "$1" != "block" ]; then exit; fi
+
+# Try to detect the user who plugged the device
+USER=`who|grep ':0'|cut -f1 -d' '  |uniq`
+if [ -z "$USER" ]; then USER=`who|grep tty|cut -f1 -d' ' |uniq`; fi
+
+# get /dev
+DEV=`udevinfo -r`
+if [ $? -eq 127 ]; then exit; fi
+
+# we need DEVPATH, and ACTION, and (DEVNAME or SUBSYSTEM) so we warn the user who executes this script himself
+if [ -z "$DEVNAME" -a -z "$SUBSYSTEM" -o -z "$DEVPATH" -o -z "$ACTION" ]; then
+  echo
+  echo "This script must be called by udevd because it needs the following environment variables: DEVPATH, ACTION, and DEVNAME or SUBSYSTEM"
+  echo "So you must copy this script as /etc/dev.d/default/updfstab-2.6.dev and set it executable"
+  echo "See: http://www.kernel.org/pub/linux/utils/kernel/hotplug/RFC-dev.d"
+  echo
+  exit
+fi
+
+# Just in case there is no DEVNAME at removal.
+if [ -z "$DEVNAME" ]; then DEVNAME="$DEV/`basename $DEVPATH`"; fi
+
+# if $DEVPATH/device exists, we are a device.
+# If we find partitions, exit because the other instances will manage them.
+# Otherwise, we're just a device formatted as is, without partitions.
+if [ -d /sys${DEVPATH}/device ]; then 
+  WE_ARE="DEVICE"
+  # do we have partitions?
+  BASE=`echo $DEVPATH | cut -d"/" -f3`
+  /bin/ls -d /sys${DEVPATH}/${BASE}* 1>/dev/null 2>/dev/null
+  if [ $? -eq 0 ]; then
+    exit
+  fi
+else
+  WE_ARE="PARTITION"
+fi
+
+# we only manage usb_storage devices
+# (better detection is welcome)
+if [ "$ACTION" = "add" ]; then
+  # two possibilities, because the /sys tree has not always the same depth
+  if [ "$WE_ARE" = "PARTITION" ]; then
+    device1="`cd -P /sys${DEVPATH}/../device/../../../../ 2> $DEV/null ; /bin/ls 2> /dev/null | grep ':' | head -n 1`"
+    device2="`cd -P /sys${DEVPATH}/../device/../../../ 2> $DEV/null ; /bin/ls 2> /dev/null | grep ':' | head -n 1`"
+  else if [ "$WE_ARE" = "DEVICE" ]; then
+    # find a way to not include usb zip drive
+    device1="`cd -P /sys${DEVPATH}/device/../../../../ 2> $DEV/null ; /bin/ls 2> /dev/null | grep ':' | head -n 1`"
+    device2="`cd -P /sys${DEVPATH}/device/../../../ 2> $DEV/null ; /bin/ls 2> /dev/null | grep ':' | head -n 1`"
+  fi; fi
+  if [ -z "$device1" -o ! -e /sys/bus/usb/drivers/usb-storage/$device1 ]; then
+      if [ -z "$device2" -o ! -e /sys/bus/usb/drivers/usb-storage/$device2 ]; then
+	        exit
+  fi; fi
+fi
+
+# lockfile used when modifying /etc/fstab
+LOCKFILE=/var/run/updfstab.dev.fstab
+# remove the lockfile when exiting
+cleanquit() {
+rm -f $LOCKFILE; exit
+}
+trap cleanquit INT
+trap cleanquit TERM
+trap cleanquit QUIT
+trap cleanquit HUP
+
+# write a lockfile to avoid simultaneous modifications of fstab by parallel executions or simultaneous access to the device
+# previous command : lockfile -1 -l 5 -s 5 $LOCKFILE
+COUNT=25
+while [ -e $LOCKFILE -a $COUNT -gt 0 ]; do
+  sleep 0.2
+  COUNT=$((COUNT-1))
+done
+touch $LOCKFILE
+
+# functions for syslog
+LOGGER="logger -t `basename $0`[$$] -p user.notice"
+write_syslog () {
+  echo ${@} | $LOGGER
+}
+
+# be sure the drivers are loaded
+/sbin/modprobe -q usb_storage
+/sbin/modprobe -q vfat
+
+# create the FHS required /media directory
+# See: http://www.pathname.com/fhs/pub/fhs-2.3.html#MEDIAMOUNTPOINT
+MNT=media
+if [ ! -d /$MNT ]; then
+  mkdir /$MNT
+  write_syslog "Created the /$MNT directory"
+  if [ "$MNT" = "media" ]; then
+    write_syslog "It is required by FHS standard"
+    write_syslog "Please read: http://www.pathname.com/fhs/pub/fhs-2.3.html#MEDIAMOUNTPOINT"
+  fi
+fi
+
+#------------------------------------UNPLUG----------------------------------
+# remove the fstab entry and the mountpoint if they already exist
+# (even when plugging, to purge the possible bad old lines)
+if grep -q "^$DEVNAME\ .*\#updfstab$" /etc/fstab; then
+  # get the mount point from fstab
+  mntpoint=`grep "^$DEVNAME\ .*\#updfstab$" /etc/fstab | sed "s/.* \/${MNT}/\/${MNT}/g; s/ .*//g"`
+  # if we want to unplug a mounted device, we are a fool, so limit the damage.
+  if mount | grep -q "^$DEVNAME\ "; then
+    # if the mountpoint is used by famd, and we kill it, we'll need to restart it
+    if fuser -v $mntpoint 2>&1 | grep -q " famd$"; then RESTARTFAMD=1; fi
+    fuser -k $mntpoint
+    sleep 1
+    fuser -k -9 $mntpoint
+    sleep 1
+    umount -fl $mntpoint
+    FAM=/etc/init.d/fam
+    if [ "$RESTARTFAMD" = "1" -a -x $FAM ]; then $FAM restart; fi
+  fi
+  # remove the mount point
+  if [ ! -z "$mntpoint" -a -d $mntpoint ]; then rmdir $mntpoint; fi
+  write_syslog "Deleted mountpoint $mntpoint"
+
+  # Remove the icon from the KDE desktop
+  kdesktop=/usr/share/apps/kdesktop
+  prettyname=`echo $mntpoint | sed "s/.*\///g"`
+  # alternative pure bash method: 
+  # TMP=$mntpoint
+  # for i in 0 1 2; do
+  #    RES[$i]=${TMP%%/*}
+  #    TMP=${TMP#*/}
+  # done
+  # prettyname=$RES[2]
+  iconFile=$kdesktop/Desktop/$prettyname
+  if [ -f $iconFile -a ! -z "$USER" ]; then
+      write_syslog "Removing the icon $iconFile"
+      rm -f $iconFile
+  fi
+
+  # remove the fstab entry corresponding to the device
+  TMP=/etc/fstab.updated$$
+  grep -v  "^$DEVNAME\ .*\#updfstab$" /etc/fstab > $TMP
+  if diff /etc/fstab $TMP > $DEV/null 2>&1; then
+    rm -f $TMP
+  else
+    if [ -s /etc/fstab.updated$$ ]; then
+      cat $TMP > /etc/fstab
+      write_syslog "Removed $DEVNAME from fstab"
+    fi
+    rm -f $TMP
+  fi
+fi
+
+#------------------------------------PLUG----------------------------------
+# if the current device is being added
+if [ "$ACTION" = "add" ]; then
+  # get partition information
+  FILETYPE="`file -Lps $DEVNAME`"
+  # if not readable, just exit (ex : usb zip drive with no disk)
+  if echo $FILETYPE | grep -qi "no read perm"; then cleanquit; fi
+  # device or partition ?
+  label=`echo "$FILETYPE" | grep "label:" | sed 's/.*label:\ *"//; s/".*//; s/[ \/]//g'`
+  if [ "$WE_ARE" = "DEVICE" ]; then cd -P /sys${DEVPATH}/device; fi
+  if [ "$WE_ARE" = "PARTITION" ]; then cd -P /sys${DEVPATH}/../device; fi
+  [ -e model ] && model="`cat model | sed 's/[ \/]//g'`"  
+  [ -e vendor ] && vendor="`cat vendor | sed 's/[ \/]//g'`"
+
+  # if we are an extended partition, just exit
+  if echo "$FILETYPE" | grep -q "extended partition table"; then cleanquit; fi
+
+  # handle XFS (the "file" command doesn't print label)
+  xfs=`echo "$FILETYPE" | grep "XFS"`
+  if [ -z "${label}" -a ! -z "${xfs}" -a -x "`which xfs_admin`" ]; then
+    label=`xfs_admin -l $DEVNAME | sed 's/.*label\ =\ *"\+//; s/"\+$//; s/[ \/]//g'`
+  fi
+
+  # handle EXT2/3
+  ext=`echo "$FILETYPE" | grep "ext[23]"`
+  if [ ! -z "${ext}" -a -z "${label}" -a -x "`which e2label`" ]; then
+    label=`e2label $DEVNAME | sed 's/[ \/]//g'`
+  fi
+
+  # build a mountpoint name = label, otherwise model, otherwise vendor, otherwise "usb-disk"
+  if [ ! -z "${label}" ]; then prettyname="${label}"
+  else if [ ! -z "${model}" ]; then prettyname="${model}"
+     else if [ ! -z "${vendor}" ]; then prettyname="${vendor}"
+          else prettyname="usb-disk"
+  fi;  fi;  fi
+  mntpoint="/$MNT/$prettyname"
+
+  # if the mount point is already used in fstab, append a number
+  if grep -qE "^[^#]*[[:space:]]$mntpoint[[:space:]]" /etc/fstab ; then
+    count=1
+    while grep -qE "^[^#]*[[:space:]]${mntpoint}_${count}[[:space:]]" /etc/fstab ; do
+      count=$((count+1))
+    done
+    mntpoint=${mntpoint}_${count}
+  fi
+  
+
+  # create the mountpoint and the fstab entry if they don't exist
+  if [ ! -d "${mntpoint}" ]; then
+    mkdir ${mntpoint}
+    write_syslog "Created mountpoint ${mntpoint}"
+  fi
+  FSTYPE=auto
+  # if we are a FAT or NTFS, set the charset to utf8
+  # Also determine the filesystem. ("auto" does not always work)
+  if echo $FILETYPE | grep -q "FAT"; then IOCHARSET=",iocharset=utf8"; FSTYPE=vfat;
+    else if echo $FILETYPE | grep -q "NTFS"; then IOCHARSET=",iocharset=utf8"; FSTYPE=ntfs;
+    else if echo $FILETYPE | grep -q "XFS"; then FSTYPE=xfs;
+    else if echo $FILETYPE | grep -q "ext2"; then FSTYPE=ext2;
+    else if echo $FILETYPE | grep -q "ext3"; then FSTYPE=ext3;
+  fi; fi; fi; fi; fi
+  FSTABLINE="$DEVNAME $mntpoint $FSTYPE user,noauto,noatime,rw${IOCHARSET} 0 0 #updfstab"
+  echo "$FSTABLINE" >> /etc/fstab
+  write_syslog "Added $DEVNAME to fstab"
+
+  ############### AUTOMOUNTING #################
+  # If you want AUTOMOUNTING, include "autoumount" in the name of the script
+  # For example: rename the script to "updfstab.automount.dev"
+  # (Then don't forget to unmount before unplugging!)
+  #
+  # we try an automounting with the user connected to X, or tty
+  if echo "$0 $@" | grep -qi automount; then
+    if [ ! -z "$USER" ]; then
+      write_syslog "Automounting $DEVNAME to ${mntpoint} as $FSTYPE"
+      su - $USER -c "mount $mntpoint"
+      # open it with konqueror if kdesktop is running
+      if ps -ef | grep -v grep | grep -q kdesktop ; then su - $USER -c "konqueror -display :0 $mntpoint &" ; fi
+    fi
+  fi
+  ##############################################
+
+  # Add an icon on the KDE desktop
+  kdesktop=/usr/share/apps/kdesktop
+  if [ -d $kdesktop -a ! -d $kdesktop/Desktop ]; then mkdir $kdesktop/Desktop; fi
+  # userDesktop=`su - $USER -c 'echo $HOME'`/Desktop
+  iconFile=$kdesktop/Desktop/$prettyname
+  if [ -d $kdesktop/Desktop ]; then
+      write_syslog "Adding an icon $iconFile"
+      cat > $iconFile <<-EOF
+[Desktop Entry]
+Dev=$DEVNAME
+Encoding=UTF-8
+Icon=hdd_mount
+MountPoint=$mntpoint
+ReadOnly=false
+Type=FSDevice
+UnmountIcon=hdd_unmount
+EOF
+    fi
+fi
+
+# remove the lockfile
+rm -f $LOCKFILE
+
+
+
+
